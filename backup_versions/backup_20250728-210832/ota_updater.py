@@ -5,25 +5,7 @@ import sys
 import threading
 import time
 import stat
-import asyncio # Importa asyncio
 from notifier import send_notification, log_event
-
-# --- NUEVA FUNCIÓN DE AYUDA ---
-def run_async(coro):
-    """Ejecuta una corutina desde un contexto síncrono."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Si ya hay un bucle corriendo, crea una tarea
-            task = loop.create_task(coro)
-            # Espera a que la tarea se complete
-            loop.run_until_complete(asyncio.sleep(0)) 
-        else:
-            # Si no hay bucle, corre hasta que se complete
-            asyncio.run(coro)
-    except RuntimeError:
-        # Si get_event_loop falla, crea uno nuevo
-        asyncio.run(coro)
 
 VERSION_FILE = "version.txt"
 BACKUP_FOLDER = "backup_versions"
@@ -39,6 +21,7 @@ def get_current_version():
 
 def get_remote_version():
     try:
+        # Use short commit hash for versioning
         subprocess.run(["git", "fetch"], check=True, capture_output=True)
         result = subprocess.run(["git", "rev-parse", "origin/main"], capture_output=True, text=True, check=True)
         return result.stdout.strip()[:7]
@@ -71,18 +54,36 @@ def restore_previous_version():
         log_event("restore_failed", {"error": str(e)})
 
 def test_new_version(tmp_folder):
+    """
+    Ejecuta test_update.py en la versión descargada temporal.
+    Si falla, retorna False y el error. Si pasa, retorna True y None.
+    """
     test_script = "test_update.py"
     test_script_path = os.path.join(tmp_folder, test_script)
+    print(f"[DEBUG OTA] Intentando correr {test_script} en {tmp_folder}")
     if not os.path.isfile(test_script_path):
+        print(f"[DEBUG OTA] No existe {test_script_path}")
         return False, "test_update.py no existe en la nueva versión."
+
     try:
+        print(f"[DEBUG OTA] Ejecutando: {sys.executable} {test_script} (cwd={tmp_folder})")
         result = subprocess.run([sys.executable, test_script], cwd=tmp_folder, capture_output=True, timeout=45)
+        
+        # --- LÍNEAS CORREGIDAS ---
         stdout_decoded = result.stdout.decode('utf-8', errors='ignore')
         stderr_decoded = result.stderr.decode('utf-8', errors='ignore')
+        # --- FIN DE LÍNEAS CORREGIDAS ---
+
+        print(f"[DEBUG OTA] returncode={result.returncode}")
+        print(f"[DEBUG OTA] stdout:\n{stdout_decoded}")
+        print(f"[DEBUG OTA] stderr:\n{stderr_decoded}")
+
         if result.returncode != 0:
-            return False, stderr_decoded + "\n" + stdout_decoded
+            error_msg = stderr_decoded + "\n" + stdout_decoded
+            return False, error_msg
         return True, None
     except Exception as e:
+        print(f"[DEBUG OTA] Exception: {str(e)}")
         return False, str(e)
 
 def fetch_new_version_to_tmp():
@@ -95,6 +96,9 @@ def fetch_new_version_to_tmp():
         raise Exception(f"Error clonando repo: {result.stderr}")
 
 def update_code_from_tmp(tmp_folder):
+    """
+    Copia los archivos actualizados del tmp_folder al directorio principal
+    """
     files_to_copy = ["bot.py", "ebay_scraper.py", "notifier.py", "ota_updater.py", "version.txt", "config.py", "requirements.txt"]
     for file in files_to_copy:
         src_file = os.path.join(tmp_folder, file)
@@ -102,6 +106,7 @@ def update_code_from_tmp(tmp_folder):
             shutil.copy(src_file, file)
     print("✅ Código actualizado desde la nueva versión probada.")
 
+# --- FUNCIONES DE BORRADO ROBUSTAS ---
 def remove_readonly(func, path, _):
     try:
         os.chmod(path, stat.S_IWRITE)
@@ -112,35 +117,54 @@ def remove_readonly(func, path, _):
 def safe_delete_folder(folder):
     try:
         shutil.rmtree(folder, onerror=remove_readonly)
+        print(f"[DEBUG OTA] Borrada carpeta temporal {folder}")
     except Exception as e:
         print(f"[DEBUG OTA] No se pudo borrar {folder}: {e} (ignorando)")
 
+# --- MAIN OTA LOGIC ---
 def check_for_updates():
     current = get_current_version()
     remote = get_remote_version()
-    if remote != current and remote != "0.0.0":
+
+    if remote != current:
         print(f"🔄 Actualizando de versión {current} a {remote}")
-        run_async(send_notification(f"🔄 Nueva versión detectada: {remote}. Probando actualización..."))
-        log_event("bot_update_detected", {"old_version": current, "new_version": remote})
+        send_notification(f"🔄 Nueva versión detectada: {remote}. Probando actualización...")
+        log_event("bot_update_detected", {
+            "old_version": current,
+            "new_version": remote
+        })
+
         try:
             backup_code()
             fetch_new_version_to_tmp()
             test_ok, test_error = test_new_version(TMP_FOLDER)
+
             if not test_ok:
                 safe_delete_folder(TMP_FOLDER)
                 msg = f"❌ Test de nueva versión {remote} falló. No se aplicó la actualización.\n\nError:\n{test_error}"
-                run_async(send_notification(msg))
+                send_notification(msg)
                 log_event("update_failed", {"error": test_error})
+                print(msg)
+                # No se restaura el backup aquí para no entrar en bucles si el backup también falla
                 return
+
             update_code_from_tmp(TMP_FOLDER)
             safe_delete_folder(TMP_FOLDER)
+
             with open("version.txt", "w") as f:
                 f.write(remote)
-            run_async(send_notification("✅ Actualización exitosa. Reiniciando bot..."))
-            log_event("bot_updated", {"status": "success", "old_version": current, "new_version": remote})
+
+            send_notification("✅ Actualización exitosa. Reiniciando bot...")
+            log_event("bot_updated", {
+                "status": "success",
+                "old_version": current,
+                "new_version": remote
+            })
+
             os.execv(sys.executable, ['python'] + sys.argv)
+
         except Exception as e:
-            run_async(send_notification(f"❌ Error crítico durante el proceso de actualización: {e}"))
+            send_notification(f"❌ Error crítico durante el proceso de actualización: {e}")
             log_event("update_failed_critical", {"error": str(e)})
             restore_previous_version()
 
@@ -154,6 +178,6 @@ def loop_update_check(interval):
             check_for_updates()
         except Exception as e:
             error_message = f"❌ Error irrecuperable en el bucle de verificación OTA: {e}"
-            run_async(send_notification(error_message))
+            send_notification(error_message)
             log_event("ota_check_loop_error", {"error": str(e)})
         time.sleep(interval)
