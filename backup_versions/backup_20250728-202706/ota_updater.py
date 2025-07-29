@@ -4,7 +4,6 @@ import subprocess
 import sys
 import threading
 import time
-import stat
 from notifier import send_notification, log_event
 
 VERSION_FILE = "version.txt"
@@ -73,7 +72,7 @@ def test_new_version(tmp_folder):
 
 def fetch_new_version_to_tmp():
     if os.path.exists(TMP_FOLDER):
-        safe_delete_folder(TMP_FOLDER)
+        shutil.rmtree(TMP_FOLDER)
     os.makedirs(TMP_FOLDER, exist_ok=True)
     cmd = ["git", "clone", "--depth", "1", "--branch", "main", GITHUB_URL, TMP_FOLDER]
     result = subprocess.run(cmd, capture_output=True)
@@ -90,22 +89,6 @@ def update_code_from_tmp(tmp_folder):
             shutil.copy(src_file, file)
     print("✅ Código actualizado desde la nueva versión probada.")
 
-# --- FUNCIONES DE BORRADO ROBUSTAS ---
-def remove_readonly(func, path, _):
-    try:
-        os.chmod(path, stat.S_IWRITE)
-        func(path)
-    except Exception as e:
-        print(f"[DEBUG OTA] Error quitando solo-lectura: {e}")
-
-def safe_delete_folder(folder):
-    try:
-        shutil.rmtree(folder, onerror=remove_readonly)
-        print(f"[DEBUG OTA] Borrada carpeta temporal {folder}")
-    except Exception as e:
-        print(f"[DEBUG OTA] No se pudo borrar {folder}: {e} (ignorando)")
-
-# --- MAIN OTA LOGIC ---
 def check_for_updates():
     current = get_current_version()
     remote = get_remote_version()
@@ -125,7 +108,7 @@ def check_for_updates():
             test_ok, test_error = test_new_version(TMP_FOLDER)
 
             if not test_ok:
-                safe_delete_folder(TMP_FOLDER)
+                shutil.rmtree(TMP_FOLDER)
                 msg = f"❌ Test de nueva versión {remote} falló. No se aplicó la actualización.\n\nError:\n{test_error}"
                 send_notification(msg)
                 log_event("update_failed", {"error": test_error})
@@ -134,7 +117,7 @@ def check_for_updates():
 
             # Si pasa el test, copia archivos y borra TMP
             update_code_from_tmp(TMP_FOLDER)
-            safe_delete_folder(TMP_FOLDER)
+            shutil.rmtree(TMP_FOLDER)
 
             with open("version.txt", "w") as f:
                 f.write(remote)
