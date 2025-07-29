@@ -9,6 +9,7 @@ from notifier import send_notification, log_event
 VERSION_FILE = "version.txt"
 BACKUP_FOLDER = "backup_versions"
 TMP_FOLDER = "ota_update_tmp"
+# 🚩 CAMBIA AQUÍ por tu repo real:
 GITHUB_URL = "https://github.com/Jeixbm/ebay-bot.git"  # <--- ¡CORREGIDO!
 
 def get_current_version():
@@ -44,6 +45,7 @@ def restore_previous_version():
             shutil.copy(os.path.join(last_backup, file), file)
         print("🔁 Restaurando versión anterior...")
 
+
 def test_new_version(tmp_folder):
     """
     Ejecuta test_update.py en la versión descargada temporal.
@@ -51,24 +53,18 @@ def test_new_version(tmp_folder):
     """
     test_script = "test_update.py"
     test_script_path = os.path.join(tmp_folder, test_script)
-    print(f"[DEBUG OTA] Intentando correr {test_script} en {tmp_folder}")
     if not os.path.isfile(test_script_path):
-        print(f"[DEBUG OTA] No existe {test_script_path}")
         return False, "test_update.py no existe en la nueva versión."
 
     try:
-        print(f"[DEBUG OTA] Ejecutando: {sys.executable} {test_script} (cwd={tmp_folder})")
         result = subprocess.run([sys.executable, test_script], cwd=tmp_folder, capture_output=True, timeout=45)
-        print(f"[DEBUG OTA] returncode={result.returncode}")
-        print(f"[DEBUG OTA] stdout:\n{result.stdout.decode()}")
-        print(f"[DEBUG OTA] stderr:\n{result.stderr.decode()}")
         if result.returncode != 0:
             error_msg = result.stderr.decode() + "\n" + result.stdout.decode()
             return False, error_msg
         return True, None
     except Exception as e:
-        print(f"[DEBUG OTA] Exception: {str(e)}")
         return False, str(e)
+
 
 def fetch_new_version_to_tmp():
     if os.path.exists(TMP_FOLDER):
@@ -78,16 +74,6 @@ def fetch_new_version_to_tmp():
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
         raise Exception(f"Error clonando repo: {result.stderr.decode()}")
-
-def update_code_from_tmp(tmp_folder):
-    """
-    Copia los archivos actualizados del tmp_folder al directorio principal
-    """
-    for file in ["bot.py", "ebay_scraper.py", "notifier.py", "ota_updater.py", "version.txt"]:
-        src_file = os.path.join(tmp_folder, file)
-        if os.path.exists(src_file):
-            shutil.copy(src_file, file)
-    print("✅ Código actualizado desde la nueva versión probada.")
 
 def check_for_updates():
     current = get_current_version()
@@ -106,18 +92,18 @@ def check_for_updates():
             # Paso nuevo: descarga y test
             fetch_new_version_to_tmp()
             test_ok, test_error = test_new_version(TMP_FOLDER)
+            shutil.rmtree(TMP_FOLDER)
 
             if not test_ok:
-                shutil.rmtree(TMP_FOLDER)
                 msg = f"❌ Test de nueva versión {remote} falló. No se aplicó la actualización.\n\nError:\n{test_error}"
                 send_notification(msg)
                 log_event("update_failed", {"error": test_error})
                 print(msg)
                 return
 
-            # Si pasa el test, copia archivos y borra TMP
-            update_code_from_tmp(TMP_FOLDER)
-            shutil.rmtree(TMP_FOLDER)
+            # Si pasa el test, actualiza normalmente
+            subprocess.run(["git", "stash"], check=True)
+            subprocess.run(["git", "pull"], check=True)
 
             with open("version.txt", "w") as f:
                 f.write(remote)
