@@ -10,7 +10,7 @@ from notifier import send_notification, log_event
 VERSION_FILE = "version.txt"
 BACKUP_FOLDER = "backup_versions"
 TMP_FOLDER = "ota_update_tmp"
-GITHUB_URL = "https://github.com/Jeixbm/ebay-bot.git"
+GITHUB_URL = "https://github.com/Jeixbm/ebay-bot.git"  # <--- ¡CORREGIDO!
 
 def get_current_version():
     try:
@@ -21,37 +21,29 @@ def get_current_version():
 
 def get_remote_version():
     try:
-        # Use short commit hash for versioning
-        subprocess.run(["git", "fetch"], check=True, capture_output=True)
+        result = subprocess.run(["git", "ls-remote", "origin", "HEAD"], capture_output=True, text=True, check=True)
+        subprocess.run(["git", "fetch"], check=True)
         result = subprocess.run(["git", "rev-parse", "origin/main"], capture_output=True, text=True, check=True)
         return result.stdout.strip()[:7]
     except subprocess.CalledProcessError:
-        log_event("get_remote_version_failed", {})
         return get_current_version()
 
 def backup_code():
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     folder = os.path.join(BACKUP_FOLDER, f"backup_{timestamp}")
     os.makedirs(folder, exist_ok=True)
-    files_to_backup = ["bot.py", "ebay_scraper.py", "notifier.py", "ota_updater.py", "version.txt", "config.py", "requirements.txt"]
-    for file in files_to_backup:
+    for file in ["bot.py", "ebay_scraper.py", "notifier.py", "ota_updater.py", "version.txt"]:
         if os.path.exists(file):
             shutil.copy(file, os.path.join(folder, file))
     print("🗂️ Código actual respaldado.")
-    log_event("backup_created", {"folder": folder})
 
 def restore_previous_version():
-    try:
-        folders = sorted(os.listdir(BACKUP_FOLDER), reverse=True)
-        if folders:
-            last_backup = os.path.join(BACKUP_FOLDER, folders[0])
-            for file in os.listdir(last_backup):
-                shutil.copy(os.path.join(last_backup, file), file)
-            print("🔁 Restaurando versión anterior...")
-            log_event("version_restored", {"backup_folder": last_backup})
-    except Exception as e:
-        print(f"Error al restaurar: {e}")
-        log_event("restore_failed", {"error": str(e)})
+    folders = sorted(os.listdir(BACKUP_FOLDER), reverse=True)
+    if folders:
+        last_backup = os.path.join(BACKUP_FOLDER, folders[0])
+        for file in os.listdir(last_backup):
+            shutil.copy(os.path.join(last_backup, file), file)
+        print("🔁 Restaurando versión anterior...")
 
 def test_new_version(tmp_folder):
     """
@@ -68,18 +60,11 @@ def test_new_version(tmp_folder):
     try:
         print(f"[DEBUG OTA] Ejecutando: {sys.executable} {test_script} (cwd={tmp_folder})")
         result = subprocess.run([sys.executable, test_script], cwd=tmp_folder, capture_output=True, timeout=45)
-        
-        # --- LÍNEAS CORREGIDAS ---
-        stdout_decoded = result.stdout.decode('utf-8', errors='ignore')
-        stderr_decoded = result.stderr.decode('utf-8', errors='ignore')
-        # --- FIN DE LÍNEAS CORREGIDAS ---
-
         print(f"[DEBUG OTA] returncode={result.returncode}")
-        print(f"[DEBUG OTA] stdout:\n{stdout_decoded}")
-        print(f"[DEBUG OTA] stderr:\n{stderr_decoded}")
-
+        print(f"[DEBUG OTA] stdout:\n{result.stdout.decode()}")
+        print(f"[DEBUG OTA] stderr:\n{result.stderr.decode()}")
         if result.returncode != 0:
-            error_msg = stderr_decoded + "\n" + stdout_decoded
+            error_msg = result.stderr.decode() + "\n" + result.stdout.decode()
             return False, error_msg
         return True, None
     except Exception as e:
@@ -91,16 +76,15 @@ def fetch_new_version_to_tmp():
         safe_delete_folder(TMP_FOLDER)
     os.makedirs(TMP_FOLDER, exist_ok=True)
     cmd = ["git", "clone", "--depth", "1", "--branch", "main", GITHUB_URL, TMP_FOLDER]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+    result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
-        raise Exception(f"Error clonando repo: {result.stderr}")
+        raise Exception(f"Error clonando repo: {result.stderr.decode()}")
 
 def update_code_from_tmp(tmp_folder):
     """
     Copia los archivos actualizados del tmp_folder al directorio principal
     """
-    files_to_copy = ["bot.py", "ebay_scraper.py", "notifier.py", "ota_updater.py", "version.txt", "config.py", "requirements.txt"]
-    for file in files_to_copy:
+    for file in ["bot.py", "ebay_scraper.py", "notifier.py", "ota_updater.py", "version.txt"]:
         src_file = os.path.join(tmp_folder, file)
         if os.path.exists(src_file):
             shutil.copy(src_file, file)
@@ -136,6 +120,7 @@ def check_for_updates():
 
         try:
             backup_code()
+            # Paso nuevo: descarga y test
             fetch_new_version_to_tmp()
             test_ok, test_error = test_new_version(TMP_FOLDER)
 
@@ -145,9 +130,9 @@ def check_for_updates():
                 send_notification(msg)
                 log_event("update_failed", {"error": test_error})
                 print(msg)
-                # No se restaura el backup aquí para no entrar en bucles si el backup también falla
                 return
 
+            # Si pasa el test, copia archivos y borra TMP
             update_code_from_tmp(TMP_FOLDER)
             safe_delete_folder(TMP_FOLDER)
 
@@ -164,8 +149,8 @@ def check_for_updates():
             os.execv(sys.executable, ['python'] + sys.argv)
 
         except Exception as e:
-            send_notification(f"❌ Error crítico durante el proceso de actualización: {e}")
-            log_event("update_failed_critical", {"error": str(e)})
+            send_notification(f"❌ Error al buscar o aplicar actualizaciones: {e}")
+            log_event("update_failed", {"error": str(e)})
             restore_previous_version()
 
 def periodic_update_check(interval=300):
@@ -177,7 +162,6 @@ def loop_update_check(interval):
         try:
             check_for_updates()
         except Exception as e:
-            error_message = f"❌ Error irrecuperable en el bucle de verificación OTA: {e}"
-            send_notification(error_message)
-            log_event("ota_check_loop_error", {"error": str(e)})
+            send_notification(f"❌ Error durante la verificación OTA: {e}")
+            log_event("ota_check_error", {"error": str(e)})
         time.sleep(interval)
